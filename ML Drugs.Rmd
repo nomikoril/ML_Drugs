@@ -1,0 +1,446 @@
+---
+title: "Drugs Classification"
+author: "Nomin Batbayar"
+date: "6/3/2022"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+We have used Logistic regression, K-Nearest Neighbor, and Regularization algorithm for Drugs data set classification. So far the best method with highest Balanced Accuracy was Regularization algorithm. In this report, we are presenting the results of these methods.
+
+## Data preprocessing & Relavant variables
+
+Prior to selecting data for our model, we are normalizing numeric variables and making categorical variables into factor or ordered factor variables.
+
+```{r message=FALSE, warning=FALSE, echo = FALSE,include=FALSE}
+requiredPackages = c("readr", "tidyverse", "caret", "tibble", "purrr", "corrplot", "DescTools", 
+                     "verification", "lmtest", "stargazer", "bestNormalize", "class", "tidyverse",
+                     "janitor", "glmnet", "kernlab", "pROC", "DMwR2", "ROSE", "janitor", "readxl")
+for(i in requiredPackages){if(!require(i,character.only = TRUE)) install.packages(i)}
+for(i in requiredPackages){if(!require(i,character.only = TRUE)) library(i,character.only = TRUE) }
+
+drugs <- read_csv("C:/Users/nomin/OneDrive/Desktop/DSBA/2.5. Machine learning 1/_assessment_data_and_desctiption/drugs_train.csv")
+
+```
+
+### Target variable
+
+In the Drug data set target variable is "COCAINE" /consumption_cocaine_last_month/ which is whether if the person used cocaine in last month. We can clearly see from below that we have unbalanced data, less than 10 percent of is "YES", positive group. So we will use resampling methods to balance the data further in our models.
+
+```{r message=FALSE, warning=FALSE}
+
+colnames(drugs)[21]<-"cocaine"
+drugs$cocaine_num[drugs$cocaine=="No"]<-0
+drugs$cocaine_num[drugs$cocaine=="Yes"]<-1
+drugs$cocaine_num<-as.numeric(drugs$cocaine_num)
+
+tabyl(drugs$cocaine)
+```
+
+### Numeric variables {.tabset}
+
+#### Histogram
+
+Most of the variable looks normaly distributed, except for Sensation and impulsiveness. We made normalization transformation in this variables.
+
+```{r }
+par(mfrow=c(3,3))
+for (variable in 7:13) {
+  hist(drugs[[variable]], xlab=NULL , main=paste(drugs[variable] %>% colnames())) 
+}
+
+for (variable in 7:13) {
+  drugs[[variable]]<-as.numeric(scale(drugs[[variable]])) 
+}
+
+```
+
+#### BoxPlots
+
+Below we are showing the box plot graphics of numeric variables to check if there is any significant difference in the 2 group. With the person who used cocaine last month, agreeableness variable is slightly lower but not significant, whereas impulsiveness and sensation is higher. Other variables are not significantly different.
+
+```{r }
+### numeric variables ###
+drugs_numeric_vars <- sapply(drugs, is.numeric) %>% which() %>% names() 
+
+par(mfrow=c(3,3))
+for (variable in 7:13) {
+  boxplot(drugs[[variable]]~drugs$cocaine, data=drugs ,  main=paste(drugs[variable] %>% colnames()), xlab="Cocaine", ylab = NULL) 
+}
+par(mfrow=c(1,1))
+```
+
+#### Correlation between numeric variables
+
+We can see from the correlation plot there is no high correlation between target variable and numeric variables. Sensation and impulsiveness are more correlated with target variable than other variables, and there is high correlation between them. This could cause multicollinearity problem, as well as overfitting problem. Which will drop the accuracy of the model. So we will exclude one of them.
+
+```{r }
+
+drugs_numeric_correlations <- cor(drugs[, drugs_numeric_vars], use = "pairwise.complete.obs")
+drugs_numeric_vars_order <- drugs_numeric_correlations[,"cocaine_num"] %>% sort(decreasing = TRUE) %>%  names()
+corrplot.mixed(drugs_numeric_correlations[drugs_numeric_vars_order, drugs_numeric_vars_order],
+               upper = "square",
+               lower = "number",
+               tl.col = "grey", # color of labels (variable names)
+               tl.pos = "lt",
+               tl.cex = 0.7,
+               number.cex = 0.7,
+               cl.cex = 0.7)  # position of labels (lt = left and top)
+
+```
+
+### Categorical variables {.tabset}
+
+We have 16 categorical variable in the data set. We transformed gender, country and ethnicity as unordered factor variable, and transformed other variables as ordered factor variable. In only education variable we merged some levels to have less feature in model.
+
+```{r }
+###### categorical variable #######
+
+drugs$gender<-as.factor(drugs$gender)
+drugs$country<-as.factor(drugs$country)
+drugs$ethnicity<-as.factor(drugs$ethnicity)
+drugs$age<-factor(drugs$age, levels = c("18-24", "25-34", "35-44", "45-54", "55-64", "65+"), ordered = TRUE)
+
+drugs$education<-factor(drugs$education, levels = c("Left school before 16 years", "Left school at 16 years", "Left school at 17 years", 
+                                                    "Left school at 18 years", "Some college or university, no certificate or degree", "Professional certificate/ diploma", 
+                                                    "University degree", "Masters degree", "Doctorate degree"),ordered = TRUE)
+drugs$education<-fct_collapse(drugs$education, "Secondary or below" = c("Left school before 16 years", "Left school at 16 years", "Left school at 17 years", "Left school at 18 years"))
+drugs$education<-fct_collapse(drugs$education, "Bachelor" = c("Professional certificate/ diploma", "University degree"))
+
+for (variable in 14:20) {
+  drugs[[variable]]<-factor(drugs[[variable]], levels = c("never used", "used over a decade ago", "used in last decade", "used in last year",
+                                                                          "used in last month", "used in last week","used in last day"),ordered = TRUE)}
+
+drug_categorical_vars <- sapply(drugs, is.factor) %>%  which() %>%  names()
+```
+
+#### BarPlot
+
+Below we are showing grouped bar plot of each variables with target variable. From ANOVA tab we can see that most associated variables are consumption of amphetamines, mushrooms, cannabis. More recent consumption of this substances is associated with cocaine usage in last month. And less associated variables are chocolate, alcohol and caffeine consumption.
+
+```{r }
+par(mfrow=c(3,4))
+for (variable in drug_categorical_vars) {
+  barplot(table(drugs$cocaine, drugs[[variable]]), xlab=NULL, main=paste(drugs[variable] %>% colnames()))
+}
+```
+
+#### ANOVA
+
+```{r }
+drugs_F_anova <- function(categorical_var) {
+  anova_ <- aov(drugs$cocaine_num ~ drugs[[categorical_var]]) 
+  return(summary(anova_)[[1]][1, 4])}
+
+drugs_anova_all_categorical<-sapply(drug_categorical_vars, drugs_F_anova) %>% sort(decreasing = TRUE) %>% data.frame()
+
+drugs_anova_all_categorical
+
+```
+
+## Classification
+
+In this part we will show classification model results and select best algorithm. We are using Logistic regression, K-Nearest neighbor, and Regularization algorithm for the classification. We are also using cross validation method.
+
+```{r }
+drugs$cocaine<-as.factor(drugs$cocaine)
+
+```
+
+```{r}
+#drugs_split <- createDataPartition(drugs$cocaine,
+#                                   p = 0.7, 
+#                                   list = FALSE) 
+#drug_train <- drugs[c(drugs_split),]
+#drug_test <- drugs[-c(drugs_split),]
+
+
+#save(list = c("drug_train",
+#              "drug_test"),
+#     file = "drug_train_test.RData")
+
+```
+
+### Logistic regression {.tabset}
+
+Logistic regression is one of machine learning algorithm, which is used to predict binary dependent variable. It calculates the probability of target variable to be in positive group, with explanatory variables.
+
+#### Feature selection
+
+```{r echo=FALSE}
+load("drug_train_test.RData")
+source("F_summary_binary_class.R")
+
+```
+
+From previous part, we saw some variables have very low correlation and association with target variable. Below we are estimating 3 models, first with all variables, second excluding the impulsiveness, third excluding sensation and lastly restricted alcohol, chocolate, caffeine consumption variable. We can see below P-Values of the Likelihood ratio test of model 2 and 3, we fail to reject. So that we can exclude impulsiveness and sensation. For model 4, we reject that null hypothesis at 5%. So we will include this variables.
+
+```{r echo=FALSE}
+options(contrasts = c("contr.treatment",  "contr.treatment"))
+
+```
+
+```{r message=FALSE, warning=FALSE}
+## Unrestricted model
+model_im<-glm(cocaine~., data = drug_train[,-c(1,22)], family=binomial(link="logit"))
+## Restricted impulsiveness
+model_im_2<-glm(cocaine~., data = drug_train[,-c(1,12,22)], family=binomial(link="logit"))
+## Restricted sensation
+model_im_3<-glm(cocaine~., data = drug_train[,-c(1,13,22)], family=binomial(link="logit"))
+## Restricted consumption of alchohol, caffeine, chocolate
+model_im_4<-glm(cocaine~., data = drug_train[,-c(1,  14, 16, 18, 22)], family=binomial(link="logit"))
+
+model_2<-lrtest(model_im, model_im_2)
+model_3<-lrtest(model_im, model_im_3)
+model_4<-lrtest(model_im, model_im_4)
+
+lrtest_result<- data.frame(model_2=model_2$`Pr(>Chisq)`[2], model_3=model_3$`Pr(>Chisq)`[2], model_4=model_4$`Pr(>Chisq)`[2])
+
+lrtest_result
+
+```
+
+#### Imbalanced & Upsamling & SMOTE code
+
+As we know our data is imbalanced, we are using Up sampling and SMOTE sampling methods. Also we are using cross validation of 5 folds.
+
+```{r message=FALSE, warning=FALSE}
+fiveStats <- function(...) c(twoClassSummary(...), 
+                             defaultSummary(...))
+
+ctrl_cv5 <- trainControl( method = "cv",classProbs = TRUE, summaryFunction = fiveStats)
+
+
+# up-sampling
+set.seed(987654321)
+
+ctrl_cv5$sampling <- "up"
+drug_train_logit_up <-train(cocaine ~ ., data = drug_train[,-c(1,  12, 13,  22)],
+        method = "glm", family = "binomial", trControl = ctrl_cv5)
+
+predict_logit_up<-predict(drug_train_logit_up, drug_train)
+
+# SMOTE 
+set.seed(987654321)
+
+ctrl_cv5$sampling <- "smote"
+drug_train_logit_smote <- train(cocaine ~ ., data = drug_train[,-c(1,  12, 13,  22)],
+        method = "glm", family = "binomial", trControl = ctrl_cv5)
+
+predict_logit_smote<-predict(drug_train_logit_smote, drug_train)
+
+models_logit <- ls(pattern = "drug_train_logit")
+```
+
+#### Imbalanced & Upsamling & SMOTE evaluation
+
+Based on the Balanced Accuracy value of prediction on the training sample data UP sampling method is best.
+
+```{r}
+table(predict_logit_smote, drug_train$cocaine)
+table(predict_logit_up, drug_train$cocaine)
+
+models_logit %>% sapply(function(x) get(x) %>% predict(newdata = drug_train) %>% 
+           summary_binary_class(level_positive = "Yes",
+                                level_negative = "No",
+                                real = drug_train$cocaine)) %>% t()
+
+
+```
+
+### KNN {.tabset}
+
+K-Nearest neighbour is used for classification. It calculates category of the data within its nearest neighbor.
+
+#### Optimal K value
+
+In order to get best accuracy, we need to find the appropriate K value. We checked accuracy of model with K value from 1 to 40. If we see the ROC value, highest K is 91. For accuracy is constant at some point from approximately 10. So we choose k value of 91.
+
+```{r}
+fiveStats <- function(...) c(twoClassSummary(...), 
+                             defaultSummary(...))
+ctrl_cv <- trainControl(method = "cv", classProbs = TRUE, summaryFunction = fiveStats)
+
+different_k <- data.frame(k = seq(1, 150, 10))
+set.seed(987654321)
+drug_knn_tuned <- train(cocaine ~ ., data = drug_train[,-c(1, 12, 13, 22)],
+        method = "knn", trControl = ctrl_cv, tuneGrid = different_k)
+
+par(mfrow=c(1,2))
+plot(drug_knn_tuned$results$k, drug_knn_tuned$results$ROC, ylab="",xlab="K", main="ROC")
+plot(drug_knn_tuned$results$k, drug_knn_tuned$results$Accuracy,ylab="",xlab="K", main="Accuracy")
+par(mfrow=c(1,1))
+
+k<-drug_knn_tuned$results$k[drug_knn_tuned$results$ROC==max(drug_knn_tuned$results$ROC)]
+k
+```
+
+#### KNN with optimal K
+
+With optimal K value we estimated KNN with smote and up sampling.
+
+```{r}
+fiveStats <- function(...) c(twoClassSummary(...), 
+                             defaultSummary(...))
+
+k_value <- data.frame(k =k)
+ctrl_cv5 <- trainControl(method = "cv",classProbs = TRUE, summaryFunction = fiveStats)
+ctrl_cv5$sampling<-"smote"
+drug_train_knn_smote <- train(cocaine ~ ., data = drug_train[,-c(1, 12, 13,  22)],
+        method = "knn",trControl = ctrl_cv5, tuneGrid = k_value)
+
+predict_knn_smote<-predict(drug_train_knn_smote, drug_train)
+
+ctrl_cv5$sampling<-"up"
+drug_train_knn_up <- train(cocaine ~ ., data = drug_train[,-c(1,  12, 13, 22)],
+        method = "knn",trControl = ctrl_cv5, tuneGrid = k_value)
+predict_knn_up<-predict(drug_train_knn_up, drug_train)
+
+
+models_knn <- ls(pattern = "drug_train_knn")
+```
+
+#### KNN evaluation
+
+We can see that KNN method is predicting worse than logistic regression.
+
+```{r}
+models_knn %>% sapply(function(x) get(x) %>% predict(newdata = drug_train) %>% 
+           summary_binary_class(level_positive = "Yes",
+                                level_negative = "No",
+                                real = drug_train$cocaine)) %>% t()
+
+```
+
+### Regularization {.tabset}
+
+We would like to see if we make the prediction of logit regression with help of regularization method. Lasso regularization works better with a few significant variables, and the rest of the variable's coefficients are very small. With the help of lambda parameter, we can include all variables. Because it will shrink the unrelevant variable coefficients to 0. So that if we might excluded relevant or included unrelevant variables in logit regression, Lasso will fix this problem.
+
+#### Optimal lambda value
+
+```{r}
+options(contrasts = c("contr.treatment",  # for non-ordinal factors
+                      "contr.treatment")) # for ordinal factors
+
+
+
+ctrl_cv5 <- trainControl(method = "cv",
+                         number = 5)
+lambdas <- seq(0, 1, 0.001)
+parameters <- expand.grid(alpha = 1, # lasso 
+                                lambda = lambdas)
+set.seed(123456789)
+drug_lasso_tune <- train(cocaine ~ .,
+                      data = drug_train[,-c(1,22)],
+                      method = "glmnet", 
+                      family = "binomial",
+                      tuneGrid = parameters,
+                      trControl = ctrl_cv5)
+
+
+l<-min(drug_lasso_tune$results$lambda[drug_lasso_tune$results$Accuracy==max(drug_lasso_tune$results$Accuracy)])
+l
+
+```
+
+#### Optimal lambda
+
+```{r}
+ctrl_cv5 <- trainControl(method = "cv", classProbs = TRUE, summaryFunction = fiveStats)
+
+ctrl_cv5$sampling<-"up"
+drug_train_lasso_up <- train(cocaine ~ .,
+                           data = drug_train[,-c(1,22)],
+                           method = "glmnet", 
+                           family = "binomial",
+                           tuneGrid = expand.grid(alpha = 1, 
+                                                  lambda = l),
+                           trControl = ctrl_cv5)
+
+predict_lasso_up <- predict(drug_train_lasso_up, drug_train)
+table(predict_lasso_up, drug_train$cocaine)
+
+ctrl_cv5$sampling<-"smote"
+drug_train_lasso_smote <- train(cocaine ~ .,
+                           data = drug_train[,-c(1,22)],
+                           method = "glmnet", 
+                           family = "binomial",
+                           tuneGrid = expand.grid(alpha = 1, 
+                                                  lambda = l),
+                           trControl = ctrl_cv5)
+
+predict_lasso_smote <- predict(drug_train_lasso_smote, drug_train)
+table(predict_lasso_smote, drug_train$cocaine)
+
+models_lasso <- ls(pattern = "drug_train_lasso")
+
+
+```
+
+#### Regularization evaluation
+
+We can see that Lasso, prediction accuracy falled from logistic regression.
+
+```{r}
+models_lasso %>% sapply(function(x) get(x) %>% predict(newdata = drug_train) %>% 
+           summary_binary_class(level_positive = "Yes",
+                                level_negative = "No",
+                                real = drug_train$cocaine)) %>% t()
+```
+
+### Evaluation of all models
+
+We know that best model predicted with training data is logistic regression with up sampling. However below results show that lasso method with up sampling is better.
+
+```{r}
+models_all <- ls(pattern = "drug_train_")
+
+
+models_all %>% sapply(function(x) get(x) %>% predict(newdata = drug_test) %>% 
+           summary_binary_class(level_positive = "Yes",
+                                level_negative = "No",
+                                real = drug_test$cocaine)) %>% t()
+
+```
+
+### Test data prediction
+
+In this part we are applying same data preprocessing rules and predicting the test data with lasso model and saving the output to csv.
+
+```{r warning=FALSE, message=FALSE}
+drugs_test<-read_csv("C:/Users/nomin/OneDrive/Desktop/DSBA/2.5. Machine learning 1/_assessment_data_and_desctiption/drugs_test.csv")
+
+
+for (variable in 7:13) {
+  drugs_test[[variable]]<-as.numeric(scale(drugs_test[[variable]])) 
+}
+
+drugs_test$gender<-as.factor(drugs_test$gender)
+drugs_test$country<-as.factor(drugs_test$country)
+drugs_test$ethnicity<-as.factor(drugs_test$ethnicity)
+drugs_test$age<-factor(drugs_test$age, levels = c("18-24", "25-34", "35-44", "45-54", "55-64", "65+"), ordered = TRUE)
+
+drugs_test$education<-factor(drugs_test$education, levels = c("Left school before 16 years", "Left school at 16 years", "Left school at 17 years", 
+                                                    "Left school at 18 years", "Some college or university, no certificate or degree", "Professional certificate/ diploma", 
+                                                    "University degree", "Masters degree", "Doctorate degree"),ordered = TRUE)
+drugs_test$education<-fct_collapse(drugs_test$education, "Secondary or below" = c("Left school before 16 years", "Left school at 16 years", "Left school at 17 years", "Left school at 18 years"))
+drugs_test$education<-fct_collapse(drugs_test$education, "Bachelor" = c("Professional certificate/ diploma", "University degree"))
+
+for (variable in 14:20) {
+  drugs_test[[variable]]<-factor(drugs_test[[variable]], levels = c("never used", "used over a decade ago", "used in last decade", "used in last year",
+                                                                          "used in last month", "used in last week","used in last day"),ordered = TRUE)}
+
+
+drugs_test$consumption_cocaine_last_month<-predict(drug_train_lasso_up, drugs_test) 
+
+write_excel_csv2(drugs_test, "drugs_test_prediction.csv", delim=",")
+
+```
